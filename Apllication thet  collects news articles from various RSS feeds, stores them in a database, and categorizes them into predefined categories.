@@ -1,0 +1,95 @@
+pip install feedparser
+pip install spacy
+pip install sqlalchemy
+pip install psycopg2
+pip install celery
+pip install NLTK
+
+import feedparser
+import spacy
+from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime
+from celery import Celery
+
+
+DATABASE_URL = "postgresql://your_username:your_password@localhost:5432/news_db"
+
+engine = create_engine(DATABASE_URL)
+Base = declarative_base()
+
+
+class NewsArticle(Base):
+    _tablename_ = 'news_articles'
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, unique=True, index=True)
+    content = Column(Text)
+    publication_date = Column(DateTime)
+    source_url = Column(String)
+    category = Column(String)
+
+
+Base.metadata.create_all(bind=engine)
+
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+session = SessionLocal()
+
+
+app = Celery('rss_reader', broker='pyamqp://guest@localhost//')
+
+
+nlp = spacy.load('en_core_web_sm')
+
+
+def classify_article(article_content):
+    doc = nlp(article_content)
+    keywords = {
+        'terrorism': ['terrorism', 'protest', 'unrest', 'riot', 'political unrest'],
+        'positive': ['uplifting', 'positive', 'good news'],
+        'natural_disaster': ['earthquake', 'flood', 'hurricane', 'disaster'],
+    }
+    for category, words in keywords.items():
+        if any(word in doc.text.lower() for word in words):
+            return category
+    return 'others'
+
+
+RSS_FEEDS = [
+    'http://rss.cnn.com/rss/cnn_topstories.rss',
+    'http://qz.com/feed',
+    'http://feeds.foxnews.com/foxnews/politics',
+    'http://feeds.reuters.com/reuters/businessNews',
+    'http://feeds.feedburner.com/NewshourWorld',
+    'https://feeds.bbci.co.uk/news/world/asia/india/rss.xml'
+]
+
+
+def fetch_and_store_articles():
+    for feed_url in RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
+        for entry in feed.entries:
+            article_data = {
+                'title': entry.title,
+                'content': entry.summary,
+                'publication_date': datetime.strptime(entry.published, "%a, %d %b %Y %H:%M:%S %Z"),
+                'source_url': entry.link
+            }
+            existing_article = session.query(NewsArticle).filter_by(title=article_data['title']).first()
+            if not existing_article:
+                
+                article_data['category'] = classify_article(article_data['content'])
+                new_article = NewsArticle(**article_data)
+                session.add(new_article)
+                session.commit()
+                print(f"Stored article: {article_data['title']}")
+
+
+@app.task
+def process_articles():
+    fetch_and_store_articles()
+
+if _name_ == "_main_":
+    process_articles()
